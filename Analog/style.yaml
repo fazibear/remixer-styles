@@ -1,0 +1,232 @@
+name: Analog
+min_height: 644
+max_height: 644
+track_layout: strips
+
+fonts:
+  track: { family: Arial, size: 16 }
+  readout: { family: Arial, size: 14 }
+  caption: { family: Arial, size: 12 }
+  scale: { family: Arial, size: 10 }
+  pan: { family: Arial, size: 11 }
+  meter: { family: Arial, size: 9 }
+
+strings:
+  clip: "CLIP"
+  pan: "PAN"
+  left: "L"
+  right: "R"
+  plus_12: "+12"
+  zero: "0"
+  minus_12: "−12"
+  minus_24: "−24"
+  minus_36: "−36"
+  minus_48: "−48"
+  minus_60: "−60"
+
+settings:
+  background: "#141313"
+  led_off: "#19200d"
+  led_rim: "#090906"
+
+shader: |
+  // Geometry and photographed controls from Mixfinity's Analog style.
+  const STRIP_WIDTH: f32 = 126.0;
+  const STRIP_HEIGHT: f32 = 632.0;
+  const PANEL_MARGIN: f32 = 6.0;
+  const THUMB_HEIGHT: f32 = 50.0;
+  const LED_COUNT: u32 = 30u;
+  const LED_PITCH: f32 = 9.0;
+  const PAN: u32 = 2u;
+  const MUTE: u32 = 3u;
+  const SOLO: u32 = 4u;
+  const RESET_CLIP: u32 = 17u;
+
+  fn panel_origin(track: u32) -> vec2<f32> {
+      return tracks[track].rect.xy + vec2<f32>(0.0, PANEL_MARGIN);
+  }
+
+  fn track_at(screen: vec2<f32>) -> u32 {
+      let count = u32(frame.viewport.w);
+      for (var track = 0u; track < count; track++) {
+          let clip = tracks[track].clip;
+          let panel = vec4<f32>(panel_origin(track), STRIP_WIDTH, STRIP_HEIGHT);
+          if contains(panel, screen) && all(screen >= clip.xy) && all(screen < clip.zw) {
+              return track;
+          }
+      }
+      return count;
+  }
+
+  fn flag(track: u32, mask: u32) -> bool {
+      return (tracks[track].state.x & mask) != 0u;
+  }
+
+  fn control(kind: u32) -> vec4<f32> {
+      switch kind {
+          case SELECT_TRACK: { return vec4<f32>(7.0, 0.0, 111.0, 75.0); }
+          case RESET_CLIP: { return vec4<f32>(75.0, 83.0, 22.0, 23.0); }
+          case SET_VOLUME_DB: { return vec4<f32>(47.0, 114.0, 32.0, 302.0); }
+          case PAN: { return vec4<f32>(23.0, 480.0, 80.0, 80.0); }
+          case MUTE: { return vec4<f32>(25.0, 568.0, 39.0, 36.0); }
+          case SOLO: { return vec4<f32>(69.0, 568.0, 39.0, 36.0); }
+          default: { return vec4<f32>(0.0); }
+      }
+  }
+
+  fn linear_rgb(srgb: vec3<f32>) -> vec3<f32> {
+      return select(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3<f32>(2.4)), srgb > vec3<f32>(0.04045));
+  }
+
+  fn paint(color: vec4<f32>, asset: u32, uv: vec2<f32>) -> vec4<f32> {
+      let sample = style_image(asset, uv);
+      return vec4<f32>(mix(color.rgb, linear_rgb(sample.rgb), sample.a), 1.0);
+  }
+
+  fn artwork(color: vec4<f32>, asset: u32, point: vec2<f32>, bounds: vec4<f32>) -> vec4<f32> {
+      return paint(color, asset, (point - bounds.xy) / bounds.zw);
+  }
+
+  fn fader_position(track: u32, bounds: vec4<f32>) -> f32 {
+      let position = (12.0 - clamp(tracks[track].values.x, -60.0, 12.0)) / 72.0;
+      return bounds.y + position * (bounds.w - THUMB_HEIGHT);
+  }
+
+  fn draw_meter(color: vec4<f32>, point: vec2<f32>, track: u32, channel: u32) -> vec4<f32> {
+      let rail = vec4<f32>(91.0 + 14.0 * f32(channel), 146.0, 12.0, f32(LED_COUNT) * LED_PITCH);
+      if !contains(rail, point) { return color; }
+
+      let row = u32(floor((point.y - rail.y) / LED_PITCH));
+      let center = vec2<f32>(rail.x + rail.z * 0.5, rail.y + (f32(row) + 0.5) * LED_PITCH);
+      let local = point - center;
+      let radius = length(local);
+      if radius >= 4.0 { return color; }
+
+      let peaks = tracks[track].peaks;
+      let level = clamp((peaks[channel] + 60.0) / 60.0, 0.0, 1.0);
+      let lit = u32(floor(level * f32(LED_COUNT)));
+      let lens = select(SETTING_LED_RIM, SETTING_LED_OFF, radius < 3.0);
+      if row < LED_COUNT - lit { return lens; }
+
+      let asset = select(select(IMG_LED_GREEN, IMG_LED_YELLOW, row < 10u), IMG_LED_RED, row < 4u);
+      return paint(lens, asset, local / 8.0 + 0.5);
+  }
+
+  fn draw_pan(color: vec4<f32>, point: vec2<f32>, track: u32) -> vec4<f32> {
+      let ring = control(PAN);
+      let backdrop = artwork(color, IMG_KNOB_RING, point, ring);
+      let knob_size = vec2<f32>(44.0);
+      let center = ring.xy + vec2<f32>(40.0, 34.0);
+      let local = point - center;
+      let angle = -clamp(tracks[track].values.y, -1.0, 1.0) * 2.35;
+      let direction = vec2<f32>(cos(angle), sin(angle));
+      let rotated = vec2<f32>(dot(local, vec2<f32>(direction.x, -direction.y)), dot(local, direction.yx));
+      return paint(backdrop, IMG_KNOB, rotated / knob_size + 0.5);
+  }
+
+  @fragment
+  fn fs(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+      let screen = pixel.xy / frame.viewport.z;
+      let track = track_at(screen);
+      if track >= u32(frame.viewport.w) { return SETTING_BACKGROUND; }
+      let origin = panel_origin(track);
+      let point = screen - origin;
+      var color = artwork(SETTING_BACKGROUND, IMG_PANEL, point, vec4<f32>(0.0, 0.0, STRIP_WIDTH, STRIP_HEIGHT));
+
+      let nameplate = control(SELECT_TRACK);
+      color = artwork(color, IMG_NAMEPLATE, point, nameplate);
+      let hold = max(tracks[track].peaks.z, tracks[track].peaks.w);
+      color = artwork(color, select(IMG_CLIP_OFF, IMG_CLIP_ON, hold >= 0.0), point, control(RESET_CLIP));
+
+      let fader = control(SET_VOLUME_DB);
+      let rail = vec4<f32>(fader.x + 5.0, fader.y, 22.0, fader.w);
+      color = artwork(color, IMG_FADER_TRACK, point, rail);
+      let thumb = vec4<f32>(fader.x, fader_position(track, fader), fader.z, THUMB_HEIGHT);
+      color = artwork(color, IMG_FADER, point, thumb);
+
+      color = draw_meter(color, point, track, 0u);
+      color = draw_meter(color, point, track, 1u);
+      color = artwork(color, IMG_READOUT, point, vec4<f32>(21.0, 424.0, 83.0, 29.0));
+      color = draw_pan(color, point, track);
+      color = artwork(color, select(IMG_MUTE, IMG_MUTE_ON, flag(track, 4u)), point, control(MUTE));
+      color = artwork(color, select(IMG_SOLO, IMG_SOLO_ON, flag(track, 8u)), point, control(SOLO));
+      return color;
+  }
+
+  fn caption(track: u32, text: u32, font: u32, local: vec4<f32>, ink: vec4<f32>) {
+      let bounds = vec4<f32>(panel_origin(track) + local.xy, local.zw);
+      host_label_clipped(track, text, font, bounds, ink, true, tracks[track].clip);
+  }
+
+  fn emit_track_labels(track: u32) {
+      let ink = label_ink(0xede6c4u);
+      let name_ink = select(ink, label_ink(0xfff8dbu), flag(track, 2u));
+      caption(track, TRACK_NAME, FONT_TRACK, vec4<f32>(11.0, 0.0, 103.0, 75.0), name_ink);
+      caption(track, TEXT_CLIP, FONT_CAPTION, vec4<f32>(29.0, 83.0, 41.0, 23.0), ink);
+      caption(track, TEXT_LEFT, FONT_METER, vec4<f32>(91.0, 130.0, 12.0, 14.0), ink);
+      caption(track, TEXT_RIGHT, FONT_METER, vec4<f32>(105.0, 130.0, 12.0, 14.0), ink);
+
+      let ticks = array<u32, 7>(TEXT_PLUS_12, TEXT_ZERO, TEXT_MINUS_12, TEXT_MINUS_24, TEXT_MINUS_36, TEXT_MINUS_48, TEXT_MINUS_60);
+      for (var tick = 0u; tick < 7u; tick++) {
+          caption(track, ticks[tick], FONT_SCALE, vec4<f32>(10.0, 132.0 + f32(tick) * 42.0, 34.0, 14.0), ink);
+      }
+
+      caption(track, GAIN_LABEL, FONT_READOUT, vec4<f32>(23.0, 424.0, 79.0, 29.0), ink);
+      caption(track, TEXT_PAN, FONT_CAPTION, vec4<f32>(0.0, 461.0, STRIP_WIDTH, 19.0), ink);
+      if abs(tracks[track].values.y) >= 0.005 {
+          caption(track, PAN_LABEL, FONT_PAN, vec4<f32>(23.0, 543.0, 80.0, 16.0), ink);
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn emit_labels() {
+      host_begin_layout(vec2<f32>(0.0));
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if strip_visible(track) {
+              emit_track_labels(track);
+          }
+      }
+  }
+
+  fn apply_control(track: u32, kind: u32, point: vec2<f32>) {
+      let bounds = control(kind);
+      var value = 0.0;
+      if kind == SET_VOLUME_DB {
+          let position = (point.y - bounds.y - THUMB_HEIGHT * 0.5) / (bounds.w - THUMB_HEIGHT);
+          value = mix(12.0, -60.0, clamp(position, 0.0, 1.0));
+      } else if kind == PAN {
+          value = clamp((point.x - bounds.x) / bounds.z * 2.0 - 1.0, -1.0, 1.0);
+      }
+      host_action(track, kind, 0u, value);
+  }
+
+  @compute @workgroup_size(1)
+  fn pick() {
+      host_clear_hit();
+      if frame.dragging.x > 0u && frame.dragging.x <= u32(frame.viewport.w) {
+          let track = frame.dragging.x - 1u;
+          apply_control(track, frame.dragging.y, frame.mouse.xy - panel_origin(track));
+          return;
+      }
+      let track = track_at(frame.mouse.xy);
+      if track >= u32(frame.viewport.w) { return; }
+      let point = frame.mouse.xy - panel_origin(track);
+      if contains(control(SELECT_TRACK), point) {
+          apply_control(track, SELECT_TRACK, point);
+      } else if contains(control(RESET_CLIP), point) {
+          apply_control(track, RESET_CLIP, point);
+      } else if contains(control(SET_VOLUME_DB), point) {
+          apply_control(track, SET_VOLUME_DB, point);
+      } else if contains(control(PAN), point) {
+          apply_control(track, PAN, point);
+      } else if contains(control(MUTE), point) {
+          apply_control(track, MUTE, point);
+      } else if contains(control(SOLO), point) {
+          apply_control(track, SOLO, point);
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn measure() {
+      host_measure(vec3<f32>(STRIP_WIDTH, STRIP_WIDTH, STRIP_HEIGHT + PANEL_MARGIN * 2.0));
+  }

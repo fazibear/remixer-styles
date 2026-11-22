@@ -1,0 +1,365 @@
+name: Reaper Relic
+min_height: 887
+max_height: 887
+track_layout: strips
+
+fonts:
+  track: { family: Times New Roman, size: 16 }
+  caption: { family: Times New Roman, size: 21 }
+  button: { family: Times New Roman, size: 22 }
+
+strings:
+  clip: "CLIP"
+  volume: "VOLUME"
+  pan: "PAN"
+  mute: "M"
+  solo: "S"
+
+settings:
+  background: "#080605"
+  panel_base: "#0b0906"
+  needle: "#332211"
+  mute_glow: "#e3461c"
+  solo_glow: "#f6a83a"
+  mute_active: "#a4220a"
+  solo_active: "#a56310"
+
+shader: |
+  // Mixfinity's fixed-scale Reaper Relic artwork and rotary controls.
+  const STRIP_WIDTH: f32 = 132.0;
+  const STRIP_HEIGHT: f32 = 620.0;
+  const HEADER_HEIGHT: f32 = 196.0;
+  const FOOTER_HEIGHT: f32 = 71.0;
+  const METER_FACE: vec4<f32> = vec4<f32>(9.0, 2.0, 115.0, 78.0);
+  const PAN: u32 = 2u;
+  const MUTE: u32 = 3u;
+  const SOLO: u32 = 4u;
+  const RESET_CLIP: u32 = 17u;
+
+  const ARCH_HEIGHT: f32 = 66.0;
+
+  fn draw_track_arches(screen: vec2<f32>, background: vec4<f32>) -> vec4<f32> {
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          let origin = panel_origin(track) - vec2<f32>(0.0, ARCH_HEIGHT);
+          let bounds = vec4<f32>(origin, STRIP_WIDTH, ARCH_HEIGHT);
+          let clip = tracks[track].clip;
+          if contains(bounds, screen) && screen.x >= clip.x && screen.x < clip.z {
+              return paint(background, IMG_ARCH, (screen - origin) / bounds.zw);
+          }
+      }
+      return background;
+  }
+
+  fn burning_eye(color: vec4<f32>, screen: vec2<f32>, bounds: vec4<f32>,
+                 socket: vec2<f32>, source_size: vec2<f32>, phase: f32) -> vec4<f32> {
+      let local = (screen - bounds.xy) / bounds.zw * source_size - socket;
+      if any(abs(local) > vec2<f32>(18.0, 22.0)) { return color; }
+      let time = bitcast<f32>(frame.dragging.w);
+      let pulse = 0.75 + 0.16 * sin(time * 8.0 + phase) + 0.09 * sin(time * 19.0 - phase);
+      let halo = 1.0 - smoothstep(0.0, 1.0, length(local / vec2<f32>(17.0, 13.0)));
+      let core = 1.0 - smoothstep(0.0, 1.0, length(local / vec2<f32>(5.0, 3.5)));
+      let rise = clamp(-local.y / 15.0, 0.0, 1.0);
+      let bend = sin(time * 9.0 + phase + rise * 4.0) * rise * 3.0;
+      let tongue = (1.0 - smoothstep(0.0, mix(4.0, 0.4, rise), abs(local.x - bend)))
+          * (1.0 - smoothstep(0.4, 1.0, rise))
+          * (1.0 - smoothstep(0.0, 3.0, local.y));
+      let fire = vec3<f32>(0.45, 0.025, 0.002) * halo * halo
+          + vec3<f32>(0.9, 0.22, 0.025) * tongue
+          + vec3<f32>(1.0, 0.65, 0.15) * core;
+      return vec4<f32>(color.rgb + fire * pulse, 1.0);
+  }
+
+  fn drifting_embers(screen: vec2<f32>, center: vec2<f32>, extent: vec2<f32>, phase: f32) -> vec3<f32> {
+      let time = bitcast<f32>(frame.dragging.w);
+      let local = (screen - center) / extent;
+      if any(abs(local) > vec2<f32>(1.0)) { return vec3<f32>(0.0); }
+      let fade = 1.0 - smoothstep(0.35, 1.0, length(local));
+      let pulse = 0.65 + 0.35 * sin(time * 1.7 + phase);
+      var fire = vec3<f32>(0.13, 0.008, 0.001) * fade * fade * pulse;
+      for (var ember = 0u; ember < 12u; ember++) {
+          let seed = f32(ember) * 2.399 + phase;
+          let speed = 0.14 + 0.06 * fract(sin(seed) * 43758.5);
+          let rise = fract(time * speed + f32(ember) * 0.173);
+          let x = sin(seed * 7.1) * 0.65 + sin(time * 1.8 + seed) * 0.15;
+          let position = vec2<f32>(x, 0.9 - rise * 1.8);
+          let distance = length((local - position) * extent);
+          let spark = 1.0 - smoothstep(0.3, 2.0, distance);
+          let halo = 1.0 - smoothstep(0.0, 8.0, distance);
+          let life = sin(rise * 3.14159265);
+          fire += life * fade * (vec3<f32>(0.95, 0.23, 0.025) * spark
+              + vec3<f32>(0.12, 0.012, 0.001) * halo * halo);
+      }
+      return fire;
+  }
+
+  fn draw_header(screen: vec2<f32>) -> vec4<f32> {
+      let width = frame.viewport.x;
+      let center = width * 0.5;
+      // Keep the central figure legible, bringing the side figures in on wide windows.
+      let scale = min(1.0, width / 900.0);
+      let figure_height = 170.0 * scale;
+      let figure_width = figure_height * 480.0 / 260.0;
+      var color = artwork(SETTING_BACKGROUND, IMG_HEADER_TEXTURE, screen,
+          vec4<f32>(0.0, 0.0, width, HEADER_HEIGHT));
+      color = artwork(color, IMG_HEADER_GLOW, screen,
+          vec4<f32>(center - 190.0 * scale, 35.0, 380.0 * scale, 160.0));
+      let cloth_width = max(width * 0.52, 200.0);
+      color = artwork(color, IMG_HEADER_CLOTH_LEFT, screen,
+          vec4<f32>(0.0, 125.0, cloth_width, 65.0));
+      color = artwork(color, IMG_HEADER_CLOTH_RIGHT, screen,
+          vec4<f32>(width - cloth_width, 125.0, cloth_width, 65.0));
+
+      if width >= 650.0 {
+          let gap_offset = width * 0.23;
+          let extent = vec2<f32>(max(35.0, width * 0.10), 68.0);
+          color = vec4<f32>(color.rgb
+              + drifting_embers(screen, vec2<f32>(center - gap_offset, 87.0), extent, 0.0)
+              + drifting_embers(screen, vec2<f32>(center + gap_offset, 87.0), extent, 2.7), 1.0);
+      }
+
+      let blade_width = min(width * 0.38, 380.0);
+      color = artwork(color, IMG_HEADER_SCYTHE_LEFT, screen,
+          vec4<f32>(center - blade_width, 65.0, blade_width, blade_width * 155.0 / 600.0));
+      color = artwork(color, IMG_HEADER_SCYTHE_RIGHT, screen,
+          vec4<f32>(center, 65.0, blade_width, blade_width * 155.0 / 600.0));
+      if width >= 650.0 {
+          let side_height = 145.0 * scale;
+          let side_width = side_height * 380.0 / 260.0;
+          let left = vec4<f32>(16.0, 20.0, side_width, side_height);
+          let right = vec4<f32>(width - side_width - 16.0, 20.0, side_width, side_height);
+          color = artwork(color, IMG_HEADER_REAPER_LEFT, screen, left);
+          color = artwork(color, IMG_HEADER_REAPER_RIGHT, screen, right);
+          color = burning_eye(color, screen, left, vec2<f32>(283.0, 77.0), vec2<f32>(380.0, 260.0), 1.7);
+          color = burning_eye(color, screen, right, vec2<f32>(95.0, 77.0), vec2<f32>(390.0, 260.0), 3.1);
+      }
+      let central = vec4<f32>(center - figure_width * 0.5, 4.0, figure_width, figure_height);
+      color = artwork(color, IMG_HEADER_REAPER_CENTER, screen, central);
+      color = burning_eye(color, screen, central, vec2<f32>(217.0, 102.0), vec2<f32>(480.0, 260.0), 0.0);
+      color = burning_eye(color, screen, central, vec2<f32>(255.0, 102.0), vec2<f32>(480.0, 260.0), 0.8);
+      let trim_width = min(width, 710.0);
+      return artwork(color, IMG_HEADER_TRIM, screen,
+          vec4<f32>(center - trim_width * 0.5, 155.0, trim_width, 41.0));
+  }
+
+  fn footer_top() -> f32 {
+      return max(HEADER_HEIGHT, frame.viewport.y - FOOTER_HEIGHT);
+  }
+
+  fn draw_footer(screen: vec2<f32>) -> vec4<f32> {
+      let width = frame.viewport.x;
+      let top = footer_top();
+      let time = bitcast<f32>(frame.dragging.w);
+      let center = width * 0.5;
+      var color = artwork(SETTING_BACKGROUND, IMG_HEADER_GLOW, screen,
+          vec4<f32>(center - width * 0.3, top - 12.0, width * 0.6, 92.0));
+      // Reuse the header's crimson cloth, with a gentle flowing motion.
+      let cloth_width = max(width * 0.53, 200.0);
+      let flowing = screen + vec2<f32>(0.0,
+          sin(screen.x * 0.012 + time * 1.3) * 1.5
+          + sin(screen.x * 0.025 - time * 0.8) * 0.6);
+      color = artwork(color, IMG_HEADER_CLOTH_LEFT, flowing,
+          vec4<f32>(0.0, top + 8.0, cloth_width, 62.0));
+      color = artwork(color, IMG_HEADER_CLOTH_RIGHT, flowing,
+          vec4<f32>(width - cloth_width, top + 8.0, cloth_width, 62.0));
+      let extent = vec2<f32>(max(35.0, width * 0.15), 34.0);
+      let glow = drifting_embers(screen, vec2<f32>(center - width * 0.23, top + 35.0), extent, 1.2)
+          + drifting_embers(screen, vec2<f32>(center + width * 0.23, top + 35.0), extent, 3.9);
+      return vec4<f32>(color.rgb + glow, 1.0);
+  }
+
+  fn panel_origin(track: u32) -> vec2<f32> {
+      return tracks[track].rect.xy + vec2<f32>(0.0, HEADER_HEIGHT);
+  }
+
+  fn panel_clip(track: u32) -> vec4<f32> {
+      let clip = tracks[track].clip;
+      return vec4<f32>(clip.x, max(clip.y, HEADER_HEIGHT), clip.z, min(clip.w, footer_top()));
+  }
+
+  fn track_at(screen: vec2<f32>) -> u32 {
+      let count = u32(frame.viewport.w);
+      for (var track = 0u; track < count; track++) {
+          let clip = panel_clip(track);
+          let panel = vec4<f32>(panel_origin(track), STRIP_WIDTH, STRIP_HEIGHT);
+          if contains(panel, screen) && all(screen >= clip.xy) && all(screen < clip.zw) {
+              return track;
+          }
+      }
+      return count;
+  }
+
+  fn flag(track: u32, mask: u32) -> bool {
+      return (tracks[track].state.x & mask) != 0u;
+  }
+
+  fn control(kind: u32) -> vec4<f32> {
+      switch kind {
+          case SELECT_TRACK: { return vec4<f32>(9.0, 85.0, 113.0, 46.0); }
+          case RESET_CLIP: { return vec4<f32>(48.0, 166.0, 36.0, 38.0); }
+          case SET_VOLUME_DB: { return vec4<f32>(26.0, 254.0, 80.0, 80.0); }
+          case PAN: { return vec4<f32>(26.0, 408.0, 80.0, 80.0); }
+          case MUTE: { return vec4<f32>(28.0, 547.0, 34.0, 36.0); }
+          case SOLO: { return vec4<f32>(70.0, 547.0, 34.0, 36.0); }
+          default: { return vec4<f32>(0.0); }
+      }
+  }
+
+  fn linear_rgb(srgb: vec3<f32>) -> vec3<f32> {
+      return select(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3<f32>(2.4)), srgb > vec3<f32>(0.04045));
+  }
+
+  fn paint(color: vec4<f32>, asset: u32, uv: vec2<f32>) -> vec4<f32> {
+      let sample = style_image(asset, uv);
+      return vec4<f32>(mix(color.rgb, linear_rgb(sample.rgb), sample.a), 1.0);
+  }
+
+  fn artwork(color: vec4<f32>, asset: u32, point: vec2<f32>, bounds: vec4<f32>) -> vec4<f32> {
+      return paint(color, asset, (point - bounds.xy) / bounds.zw);
+  }
+
+  fn draw_meter(color: vec4<f32>, point: vec2<f32>, track: u32) -> vec4<f32> {
+      let face = artwork(color, IMG_METER_FACE, point, METER_FACE);
+      if !contains(METER_FACE, point) { return face; }
+
+      let peaks = tracks[track].peaks;
+      let level = clamp((max(peaks.x, peaks.y) + 60.0) / 60.0, 0.0, 1.0);
+      let angle = radians(mix(-50.0, 50.0, level));
+      let direction = vec2<f32>(sin(angle), -cos(angle));
+      let pivot = METER_FACE.xy + METER_FACE.zw * vec2<f32>(0.5, 0.9);
+      let offset = point - pivot;
+      let along = dot(offset, direction);
+      let across = abs(dot(offset, vec2<f32>(-direction.y, direction.x)));
+      let opacity = (1.0 - smoothstep(0.55, 1.35, across))
+          * smoothstep(0.0, 1.0, along)
+          * (1.0 - smoothstep(51.0, 53.0, along));
+      return mix(face, SETTING_NEEDLE, opacity);
+  }
+
+  fn draw_knob(color: vec4<f32>, point: vec2<f32>, bounds: vec4<f32>, position: f32) -> vec4<f32> {
+      if !contains(bounds, point) { return color; }
+      let ring = artwork(color, IMG_KNOB_RING, point, bounds);
+      let center = bounds.xy + bounds.zw * 0.5;
+      let local = point - center;
+      let angle = -mix(-2.35, 2.35, clamp(position, 0.0, 1.0));
+      let direction = vec2<f32>(cos(angle), sin(angle));
+      let rotated = vec2<f32>(dot(local, vec2<f32>(direction.x, -direction.y)), dot(local, direction.yx));
+      return paint(ring, IMG_KNOB, rotated / 56.0 + 0.5);
+  }
+
+  fn draw_button(color: vec4<f32>, point: vec2<f32>, track: u32, kind: u32) -> vec4<f32> {
+      let bounds = control(kind);
+      let solo = kind == SOLO;
+      let asset = select(IMG_MUTE, IMG_SOLO, solo);
+      let button = artwork(color, asset, point, bounds);
+      if !flag(track, select(4u, 8u, solo)) { return button; }
+
+      let glow = select(SETTING_MUTE_GLOW, SETTING_SOLO_GLOW, solo);
+      let distance = length(max(max(bounds.xy - point, point - bounds.xy - bounds.zw), vec2<f32>(0.0)));
+      let halo = 1.0 - smoothstep(0.0, 7.0, distance);
+      if !contains(bounds, point) { return mix(button, glow, halo * halo * 0.35); }
+
+      let interior = vec4<f32>(bounds.xy + 3.0, bounds.zw - 6.0);
+      let tint = select(SETTING_MUTE_ACTIVE, SETTING_SOLO_ACTIVE, solo);
+      return select(button, mix(button, tint, 0.80), contains(interior, point));
+  }
+
+  @fragment
+  fn fs(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+      let screen = pixel.xy / frame.viewport.z;
+      if screen.y < HEADER_HEIGHT {
+          return draw_track_arches(screen, draw_header(screen));
+      }
+      let footer = footer_top();
+      if screen.y >= footer {
+          return draw_footer(screen);
+      }
+
+      let track = track_at(screen);
+      if track >= u32(frame.viewport.w) { return SETTING_BACKGROUND; }
+      let point = screen - panel_origin(track);
+      var color = artwork(SETTING_PANEL_BASE, IMG_PANEL, point, vec4<f32>(0.0, 0.0, STRIP_WIDTH, STRIP_HEIGHT));
+      color = draw_meter(color, point, track);
+      color = artwork(color, IMG_NAMEPLATE, point, control(SELECT_TRACK));
+
+      let hold = max(tracks[track].peaks.z, tracks[track].peaks.w);
+      color = artwork(color, select(IMG_CLIP_OFF, IMG_CLIP_ON, hold >= 0.0), point, control(RESET_CLIP));
+      color = draw_knob(color, point, control(SET_VOLUME_DB), (tracks[track].values.x + 60.0) / 72.0);
+      color = draw_knob(color, point, control(PAN), (tracks[track].values.y + 1.0) * 0.5);
+      color = draw_button(color, point, track, MUTE);
+      return draw_button(color, point, track, SOLO);
+  }
+
+  fn caption(track: u32, text: u32, font: u32, local: vec4<f32>, ink: vec4<f32>) {
+      let bounds = vec4<f32>(panel_origin(track) + local.xy, local.zw);
+      host_label_clipped(track, text, font, bounds, ink, true, panel_clip(track));
+  }
+
+  fn emit_track_labels(track: u32) {
+      let name_ink = select(label_ink(0xf1d8a3u), label_ink(0xfff4d5u), flag(track, 2u));
+      let plate = control(SELECT_TRACK);
+      caption(track, TRACK_NAME, FONT_TRACK, vec4<f32>(plate.xy + vec2<f32>(5.0, 0.0), plate.z - 10.0, plate.w), name_ink);
+
+      let heading = label_ink(0xf6e0abu);
+      caption(track, TEXT_CLIP, FONT_CAPTION, vec4<f32>(0.0, 137.0, STRIP_WIDTH, 22.0), heading);
+      caption(track, TEXT_VOLUME, FONT_CAPTION, vec4<f32>(0.0, 218.0, STRIP_WIDTH, 22.0), heading);
+      caption(track, TEXT_PAN, FONT_CAPTION, vec4<f32>(0.0, 369.0, STRIP_WIDTH, 22.0), heading);
+
+      let normal = label_ink(0xf4dca8u);
+      let bright = label_ink(0xfff0c6u);
+      caption(track, TEXT_MUTE, FONT_BUTTON, control(MUTE), select(normal, bright, flag(track, 4u)));
+      caption(track, TEXT_SOLO, FONT_BUTTON, control(SOLO), select(normal, bright, flag(track, 8u)));
+  }
+
+  @compute @workgroup_size(1)
+  fn emit_labels() {
+      host_begin_layout(vec2<f32>(0.0));
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if strip_visible(track) {
+              emit_track_labels(track);
+          }
+      }
+  }
+
+  fn apply_knob(track: u32, kind: u32, point: vec2<f32>, dragging: bool) {
+      if kind == SET_VOLUME_DB {
+          let delta = (frame.mouse.z - frame.mouse.y) * 0.5;
+          let value = select(tracks[track].values.x, frame.mouse.w + delta, dragging);
+          host_action(track, kind, 0u, clamp(value, -60.0, 12.0));
+      } else {
+          let bounds = control(PAN);
+          let position = clamp((point.x - bounds.x) / bounds.z, 0.0, 1.0);
+          host_action(track, kind, 0u, mix(-1.0, 1.0, position));
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn pick() {
+      host_clear_hit();
+      let screen = frame.mouse.xy;
+      if frame.dragging.x > 0u && frame.dragging.x <= u32(frame.viewport.w) {
+          let track = frame.dragging.x - 1u;
+          apply_knob(track, frame.dragging.y, screen - panel_origin(track), true);
+          return;
+      }
+      let track = track_at(screen);
+      if track >= u32(frame.viewport.w) { return; }
+      let point = screen - panel_origin(track);
+      if contains(control(SELECT_TRACK), point) {
+          host_action(track, SELECT_TRACK, 0u, 0.0);
+      } else if contains(control(RESET_CLIP), point) {
+          host_action(track, RESET_CLIP, 0u, 0.0);
+      } else if contains(control(SET_VOLUME_DB), point) {
+          apply_knob(track, SET_VOLUME_DB, point, false);
+      } else if contains(control(PAN), point) {
+          apply_knob(track, PAN, point, false);
+      } else if contains(control(MUTE), point) {
+          host_action(track, MUTE, 0u, 0.0);
+      } else if contains(control(SOLO), point) {
+          host_action(track, SOLO, 0u, 0.0);
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn measure() {
+      host_measure(vec3<f32>(STRIP_WIDTH, STRIP_WIDTH, HEADER_HEIGHT + STRIP_HEIGHT + FOOTER_HEIGHT));
+  }

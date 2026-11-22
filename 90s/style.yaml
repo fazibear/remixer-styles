@@ -1,0 +1,243 @@
+name: 90s
+min_height: 297
+track_layout: strips
+expand_fx: true
+
+fonts:
+  track: { file: "Open24DisplaySt-KRL7.ttf", size: 20 }
+  index: { file: "Open24DisplaySt-KRL7.ttf", size: 21 }
+  button: { file: "Open24DisplaySt-KRL7.ttf", size: 21 }
+  channel: { file: "Open24DisplaySt-KRL7.ttf", size: 17 }
+  tick: { file: "Open24DisplaySt-KRL7.ttf", size: 17 }
+
+strings:
+  master_index: "M"
+  left: "L"
+  right: "R"
+  mute: "M"
+  solo: "S"
+  zero: "0"
+  minus_12: "-12"
+  minus_24: "-24"
+  minus_36: "-36"
+  minus_48: "-48"
+  minus_60: "-60"
+
+settings:
+  background: "#000000"
+  display: "#82f6ef"
+  selected: "#cefffc"
+  divider: "#62bdb8"
+  hover: "#103c3a"
+  meter_off: "#102e2b"
+  meter_on: "#80fff4"
+
+shader: |
+  // Port of Mixfinity's 90s fluorescent stereo display.
+  const MARGIN: f32 = 10.0;
+  const BEZEL: f32 = 6.0;
+  const STRIP_WIDTH: f32 = 132.0;
+  const METER_TOP: f32 = 67.0;
+  const METER_HEIGHT: f32 = 149.0;
+  const METER_WIDTH: f32 = 24.0;
+  const METER_PITCH: f32 = 33.0;
+  const METER_LEFT: f32 = 59.0;
+  const BUTTON_WIDTH: f32 = 36.0;
+  const BUTTON_PITCH: f32 = 51.0;
+  const BUTTON_LEFT: f32 = 27.0;
+  const STRIP_HEIGHT: f32 = METER_TOP + METER_HEIGHT + 49.0;
+  const CONTENT_HEIGHT: f32 = STRIP_HEIGHT + 2.0 * (MARGIN + BEZEL);
+  const SEGMENT_HEIGHT: f32 = 4.0;
+  const SEGMENT_GAP: f32 = 1.0;
+  const SEGMENT_PITCH: f32 = SEGMENT_HEIGHT + SEGMENT_GAP;
+  const MUTE: u32 = 3u;
+  const SOLO: u32 = 4u;
+
+  fn strip_origin(track: u32) -> vec2<f32> {
+      return tracks[track].rect.xy + vec2<f32>(0.0, MARGIN + BEZEL);
+  }
+
+  fn extra_height(track: u32) -> f32 {
+      return max(0.0, tracks[track].rect.w - CONTENT_HEIGHT);
+  }
+
+  fn meter_height(track: u32) -> f32 {
+      return METER_HEIGHT + extra_height(track);
+  }
+
+  fn strip_at(screen: vec2<f32>) -> u32 {
+      let count = u32(frame.viewport.w);
+      for (var track = 0u; track < count; track++) {
+          let clip = tracks[track].clip;
+          let bounds = vec4<f32>(strip_origin(track), STRIP_WIDTH, STRIP_HEIGHT + extra_height(track));
+          if contains(bounds, screen) && all(screen >= clip.xy) && all(screen < clip.zw) {
+              return track;
+          }
+      }
+      return count;
+  }
+
+  fn rounded_distance(point: vec2<f32>, bounds: vec4<f32>, radius: f32) -> f32 {
+      let corner = abs(point - bounds.xy - bounds.zw * 0.5) - bounds.zw * 0.5 + radius;
+      return length(max(corner, vec2<f32>(0.0))) + min(max(corner.x, corner.y), 0.0) - radius;
+  }
+
+  fn flag(track: u32, bit: u32) -> bool {
+      return (tracks[track].state.x & (1u << bit)) != 0u;
+  }
+
+  // One geometry definition drives drawing, labels, and picking.
+  fn control(track: u32, kind: u32) -> vec4<f32> {
+      let button_y = METER_TOP + meter_height(track) + 13.0;
+      switch kind {
+          case SELECT_TRACK: { return vec4<f32>(7.0, 0.0, 117.0, 37.0); }
+          case SOLO: { return vec4<f32>(BUTTON_LEFT, button_y, BUTTON_WIDTH, 27.0); }
+          case MUTE: { return vec4<f32>(BUTTON_LEFT + BUTTON_PITCH, button_y, BUTTON_WIDTH, 27.0); }
+          default: { return vec4<f32>(0.0); }
+      }
+  }
+
+  fn draw_meter(point: vec2<f32>, track: u32, channel: u32) -> vec4<f32> {
+      let rail = vec4<f32>(METER_LEFT + f32(channel) * METER_PITCH, METER_TOP, METER_WIDTH, meter_height(track));
+      if !contains(rail, point) { return SETTING_BACKGROUND; }
+      let segment_count = floor((rail.w + SEGMENT_GAP) / SEGMENT_PITCH);
+      let from_bottom = rail.y + rail.w - point.y;
+      let segment = floor(from_bottom / SEGMENT_PITCH);
+      let offset = from_bottom - segment * SEGMENT_PITCH;
+      if segment >= segment_count || offset >= SEGMENT_HEIGHT {
+          return SETTING_BACKGROUND;
+      }
+      let peak = tracks[track].peaks[channel];
+      let lit = floor(clamp((peak + 60.0) / 60.0, 0.0, 1.0) * segment_count);
+      return select(SETTING_METER_OFF, SETTING_METER_ON, segment < lit);
+  }
+
+  fn button_color(track: u32, kind: u32, point: vec2<f32>, mouse: vec2<f32>) -> vec4<f32> {
+      let bounds = control(track, kind);
+      let distance = rounded_distance(point, bounds, 4.0);
+      let enabled = flag(track, kind - 1u);
+      if distance > 0.0 {
+          let aura = 1.0 - smoothstep(0.0, 7.0, distance);
+          return mix(SETTING_BACKGROUND, SETTING_DISPLAY, select(0.0, 0.20 * aura * aura, enabled));
+      }
+      if distance > -1.0 { return SETTING_DISPLAY; }
+      let hovered = contains(bounds, mouse);
+      return select(
+          select(SETTING_BACKGROUND, SETTING_HOVER, hovered),
+          select(SETTING_DISPLAY, SETTING_SELECTED, hovered),
+          enabled
+      );
+  }
+
+  @fragment
+  fn fs(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+      let screen = pixel.xy / frame.viewport.z;
+      let bezel = vec4<f32>(
+          0.0, MARGIN, frame.viewport.x,
+          max(0.0, frame.viewport.y - 2.0 * MARGIN)
+      );
+      let edge = rounded_distance(screen, bezel, 8.0);
+      if edge <= 0.0 && edge > -1.0 { return SETTING_DISPLAY; }
+
+      let track = strip_at(screen);
+      if track >= u32(frame.viewport.w) { return SETTING_BACKGROUND; }
+      let origin = strip_origin(track);
+      let point = screen - origin;
+      if !contains(vec4<f32>(0.0, 0.0, STRIP_WIDTH, STRIP_HEIGHT + extra_height(track)), point) {
+          return SETTING_BACKGROUND;
+      }
+      let clip = tracks[track].clip;
+      let strip_right = origin.x + STRIP_WIDTH;
+      let pane_divider = clip.x > 0.0 && screen.x < clip.x + 1.0;
+      if pane_divider {
+          return SETTING_DISPLAY;
+      }
+      let at_left_edge = point.x < 1.0;
+      let at_right_edge = point.x >= STRIP_WIDTH - 1.0;
+      if at_left_edge || at_right_edge {
+          var has_next_strip = false;
+          for (var next = 0u; next < u32(frame.viewport.w); next++) {
+              let same_pane = all(tracks[next].clip.xz == clip.xz);
+              if same_pane && tracks[next].rect.x >= strip_right {
+                  has_next_strip = true;
+                  break;
+              }
+          }
+          let left_pane = clip.x == 0.0 && clip.z < frame.viewport.x;
+          if (left_pane && !has_next_strip) || (at_right_edge && has_next_strip) {
+              return SETTING_DISPLAY;
+          }
+      }
+      let title = control(track, SELECT_TRACK);
+      if contains(title, point) && point.y >= title.w - 1.0 { return SETTING_DIVIDER; }
+
+      let badge = rounded_distance(point, vec4<f32>(15.0, 6.0, 32.0, 24.0), 4.0);
+      let selected = flag(track, 1u);
+      if badge <= 0.0 { return select(SETTING_DISPLAY, SETTING_SELECTED, selected); }
+      if badge < 7.0 {
+          let halo = 1.0 - smoothstep(0.0, 7.0, badge);
+          return mix(SETTING_BACKGROUND, SETTING_DISPLAY, halo * halo * select(0.22, 0.38, selected));
+      }
+
+      let meter_bottom = METER_TOP + meter_height(track);
+      if point.y >= METER_TOP && point.y < meter_bottom {
+          let channel = select(0u, 1u, point.x >= METER_LEFT + METER_PITCH);
+          return draw_meter(point, track, channel);
+      }
+      if point.y >= meter_bottom + 6.0 && point.y < meter_bottom + 48.0 {
+          let kind = select(SOLO, MUTE, point.x >= BUTTON_LEFT + (BUTTON_WIDTH + BUTTON_PITCH) * 0.5);
+          return button_color(track, kind, point, frame.mouse.xy - origin);
+      }
+      return SETTING_BACKGROUND;
+  }
+
+  fn caption(track: u32, text: u32, font: u32, local: vec4<f32>, ink: vec4<f32>, center: bool) {
+      // This font's line metrics place the visible LCD strokes below the box center.
+      let optical_offset = vec2<f32>(0.0, -2.0);
+      let bounds = vec4<f32>(strip_origin(track) + local.xy + optical_offset, local.zw);
+      host_label_clipped(track, text, font, bounds, ink, center, tracks[track].clip);
+  }
+
+  @compute @workgroup_size(1)
+  fn emit_labels() {
+      host_begin_layout(vec2<f32>(0.0));
+      let ink = label_ink(0x82f6efu);
+      let black = label_ink(0x000000u);
+      let ticks = array<u32, 6>(TEXT_ZERO, TEXT_MINUS_12, TEXT_MINUS_24, TEXT_MINUS_36, TEXT_MINUS_48, TEXT_MINUS_60);
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          let badge = select(TRACK_INDEX, TEXT_MASTER_INDEX, flag(track, 0u));
+          caption(track, badge, FONT_INDEX, vec4<f32>(15.0, 5.0, 32.0, 26.0), black, true);
+          caption(track, TRACK_NAME, FONT_TRACK, vec4<f32>(55.0, 0.0, 67.0, 36.0), ink, false);
+          caption(track, TEXT_LEFT, FONT_CHANNEL, vec4<f32>(METER_LEFT, 44.0, METER_WIDTH, 20.0), ink, true);
+          caption(track, TEXT_RIGHT, FONT_CHANNEL, vec4<f32>(METER_LEFT + METER_PITCH, 44.0, METER_WIDTH, 20.0), ink, true);
+          for (var tick = 0u; tick < 6u; tick++) {
+              let y = METER_TOP - 6.0 + f32(tick) * (meter_height(track) - 12.0) / 5.0;
+              let x = select(5.0, 29.0, tick == 0u);
+              let width = select(53.0, 27.0, tick == 0u);
+              caption(track, ticks[tick], FONT_TICK, vec4<f32>(x, y, width, 23.0), ink, true);
+          }
+          caption(track, TEXT_SOLO, FONT_BUTTON, control(track, SOLO), select(ink, black, flag(track, 3u)), true);
+          caption(track, TEXT_MUTE, FONT_BUTTON, control(track, MUTE), select(ink, black, flag(track, 2u)), true);
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn pick() {
+      host_clear_hit();
+      let screen = frame.mouse.xy;
+      let track = strip_at(screen);
+      if track >= u32(frame.viewport.w) { return; }
+      let point = screen - strip_origin(track);
+      if contains(control(track, SELECT_TRACK), point) {
+          host_action(track, SELECT_TRACK, 0u, 0.0);
+      } else if contains(control(track, SOLO), point) {
+          host_action(track, SOLO, 0u, 0.0);
+      } else if contains(control(track, MUTE), point) {
+          host_action(track, MUTE, 0u, 0.0);
+      }
+  }
+
+  @compute @workgroup_size(1)
+  fn measure() {
+      host_measure(vec3<f32>(STRIP_WIDTH, STRIP_WIDTH, CONTENT_HEIGHT));
+  }

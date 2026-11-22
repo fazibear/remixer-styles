@@ -1,0 +1,403 @@
+name: Studio One
+track_layout: strips
+expand_fx: true
+
+fonts:
+  body: { family: Helvetica, size: 10 }
+  fx: { family: Helvetica, size: 10 }
+  small: { family: Helvetica, size: 9 }
+  button: { family: Helvetica, size: 12 }
+  meter: { family: Helvetica, size: 7 }
+  track: { family: Helvetica, size: 11 }
+
+strings:
+  inserts: "Inserts"
+  chain: "+ FX CHAIN"
+  route: "ROUTE"
+  mute: "M"
+  solo: "S"
+  record: "R"
+  off: "OFF"
+  on: "ON"
+  auto: "AUTO"
+  plus_12: "+12"
+  plus_00: "+00"
+  minus_12: "-12"
+  minus_24: "-24"
+  minus_36: "-36"
+  minus_48: "-48"
+  minus_60: "-60"
+  trim: "Trim"
+  read: "Read"
+  touch: "Touch"
+  write: "Write"
+  latch: "Latch"
+  latch_preview: "Latch P"
+  arrow: "v"
+
+shader: |
+  // Studio One — port of Mixfinity's compact 85.5 × 420 CSS style.
+  @group(0) @binding(4) var < storage, read >  send_levels: array<array<f32, 16> >;
+  const BLUE: vec3<f32> = vec3<f32>(0.318, 0.710, 0.875);
+  fn strip_metrics() -> vec3<f32> {
+      return vec3<f32>(87.0, 87.0, 420.0);
+  }
+  @compute @workgroup_size(1)
+  fn measure() {
+      host_measure(strip_metrics());
+  }
+  fn inside(point: vec2<f32>, bounds: vec4<f32>) -> bool {
+      return all(point >= bounds.xy) && all(point < bounds.xy + bounds.zw);
+  }
+  fn flag(track: u32, bit: u32) -> bool {
+      return (tracks[track].state.x & (1u << bit)) != 0u;
+  }
+  fn fx_extra(track: u32) -> f32 {
+      return max(0.0, tracks[track].rect.w - strip_metrics().z);
+  }
+  fn fx_rows(extra: f32) -> u32 {
+      return min(16u, 3u + u32(extra / 17.0));
+  }
+  fn lower_point(point: vec2<f32>, extra: f32) -> vec2<f32> {
+      return vec2<f32>(point.x, point.y - clamp(point.y - 74.0, 0.0, extra));
+  }
+  fn widget(kind: u32, slot: u32) -> vec4<f32> {
+      switch kind {
+          case 1u: {
+              return vec4<f32>(35.0, 255.0, 18.0, 105.0);
+          }
+          case 2u: {
+              return vec4<f32>(5.0, 143.5, 75.5, 16.0);
+          }
+          case 3u: {
+              return vec4<f32>(9.0, 186.0, 34.0, 20.0);
+          }
+          case 4u: {
+              return vec4<f32>(43.0, 186.0, 34.0, 20.0);
+          }
+          case 6u: {
+              return vec4<f32>(9.0, 206.0, 34.0, 20.0);
+          }
+          case 7u: {
+              return vec4<f32>(43.0, 206.0, 34.0, 20.0);
+          }
+          case 8u: {
+              return vec4<f32>(17.5, 5.0, 65.0, 14.0);
+          }
+          case 9u: {
+              return vec4<f32>(5.0, 123.0, 75.5, 15.0);
+          }
+          case 12u: {
+              return vec4<f32>(6.0, 383.5, 73.5, 15.5);
+          }
+          case 13u: {
+              return vec4<f32>(2.0, 22.5 + f32(slot) * 17.0, 81.5, 16.0);
+          }
+          case 14u: {
+              if slot < 2u {
+                  return vec4<f32>(2.0, 74.0 + f32(slot) * 22.0, 81.5, 20.0);
+              }
+              return vec4<f32>(0.0);
+          }
+          case 15u: {
+              return vec4<f32>(0.0, 405.0, 85.5, 15.0);
+          }
+          case 16u: {
+              return vec4<f32>(2.0, 365.0, 81.5, 14.0);
+          }
+          case 17u: {
+              return vec4<f32>(17.0, 255.0, 11.5, 4.0);
+          }
+          case 19u: {
+              return vec4<f32>(2.5, 5.0, 13.0, 14.0);
+          }
+          default: {
+              return vec4<f32>(0.0);
+          }
+      }
+  }
+  fn image(id: u32, uv: vec2<f32>) -> vec4<f32> {
+      let bounds = images[id * 2u];
+      if bounds.z == 0u || any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) {
+          return vec4<f32>(0.0);
+      }
+      return textureLoad(art, vec2<i32>(bounds.xy + vec2<u32>(uv * vec2<f32>(bounds.zw))), 0);
+  }
+  fn fit(color: vec3<f32>, id: u32, point: vec2<f32>, bounds: vec4<f32>) -> vec3<f32> {
+      let size = vec2<f32>(images[id * 2u].zw);
+      if any(size == vec2<f32>(0.0)) {
+          return color;
+      }
+      let fitted = size * min(bounds.z / size.x, bounds.w / size.y);
+      let a = image(id, (point - bounds.xy - (bounds.zw - fitted) * 0.5) / fitted);
+      return mix(color, a.rgb, a.a);
+  }
+  fn display(color: vec3<f32>) -> vec4<f32> {
+      return vec4<f32>(select(pow((color + 0.055) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045)), 1.0);
+  }
+  // Draw the current mixer frame.
+  @fragment fn fs(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+      let screen = pixel.xy / frame.viewport.z;
+      var track = u32(frame.viewport.w);
+      for (var i = 0u; i < u32(frame.viewport.w); i++) {
+          if inside(screen, tracks[i].rect) && all(screen >= tracks[i].clip.xy) && all(screen < tracks[i].clip.zw) {
+              track = i;
+              break;
+          }
+      }
+      let background = vec3<f32>(0.141, 0.153, 0.165);
+      if track >= u32(frame.viewport.w) {
+          return display(background);
+      }
+      let raw = screen - tracks[track].rect.xy;
+      let extra = fx_extra(track);
+      let point = lower_point(raw, extra);
+      if point.x >= 85.5 {
+          return display(background);
+      }
+      var color = vec3<f32>(0.188, 0.204, 0.220);
+      if flag(track, 10u) {
+          color = mix(color, tracks[track].color.rgb, select(0.24, 0.46, flag(track, 1u)));
+      } else if flag(track, 1u) {
+          color += vec3<f32>(0.045);
+      }
+      if point.y < 3.0 {
+          color = select(vec3<f32>(0.125, 0.141, 0.149), tracks[track].color.rgb, flag(track, 10u));
+      }
+      let power = select(IMG_POWER_OFF, IMG_POWER_ON, flag(track, 6u));
+      color = fit(color, power, point, widget(19u, 0u));
+      for (var slot = 0u; slot < fx_rows(extra); slot++) {
+          let bounds = widget(13u, slot);
+          if !inside(raw, bounds) {
+              continue;
+          }
+          if slot < tracks[track].state.w {
+              let enabled = (u32(tracks[track].values.w) & (1u << slot)) != 0u;
+              color = select(vec3<f32>(0.255, 0.278, 0.294), vec3<f32>(0.318, 0.341, 0.357), enabled);
+              color = fit(color, select(IMG_POWER_OFF, IMG_POWER_ON, enabled), raw, vec4<f32>(bounds.xy + vec2<f32>(1.0, 2.0), 12.0, 12.0));
+          }
+      }
+      if raw.y >= 74.0 && raw.y < 74.0 + extra {
+          return display(color);
+      }
+      for (var slot = 0u; slot < min(tracks[track].counts.x, 2u); slot++) {
+          let bounds = widget(14u, slot);
+          if !inside(point, bounds) {
+              continue;
+          }
+          color = vec3<f32>(0.161, 0.176, 0.188);
+          if point.y >= bounds.y + 17.0 && point.x - bounds.x < bounds.z * clamp((send_levels[track][slot] + 60.0) / 72.0, 0.0, 1.0) {
+              color = vec3<f32>(0.196, 0.655, 0.875);
+          }
+      }
+      if inside(point, widget(9u, 0u)) {
+          color = vec3<f32>(0.145, 0.161, 0.173);
+      }
+      if inside(point, widget(2u, 0u)) {
+          color = vec3<f32>(0.090, 0.110, 0.122);
+          let x = 5.0 + (tracks[track].values.y + 1.0) * 0.5 * 73.5;
+          if abs(point.x - x - 1.0) < 1.0 {
+              color = vec3<f32>(0.216, 0.773, 0.882);
+          }
+      }
+      for (var kind = 3u; kind <= 7u; kind++) {
+          if kind == 5u || (flag(track, 0u) && (kind == 6u || kind == 7u)) {
+              continue;
+          }
+          let bounds = widget(kind, 0u);
+          if !inside(point, bounds) {
+              continue;
+          }
+          color = vec3<f32>(0.157, 0.192, 0.220);
+          switch kind {
+              case 3u: {
+                  if flag(track, 2u) {
+                      color = vec3<f32>(0.847, 0.718, 0.173);
+                  }
+              }
+              case 4u: {
+                  if flag(track, 3u) {
+                      color = vec3<f32>(0.0, 0.675, 0.392);
+                  }
+              }
+              case 6u: {
+                  if flag(track, 5u) {
+                      color = vec3<f32>(0.718, 0.184, 0.216);
+                  }
+              }
+              case 7u: {
+                  if tracks[track].state.z > 0u {
+                      color = vec3<f32>(0.149, 0.557, 0.678);
+                  }
+              }
+              default: {
+              }
+          }
+          let local = point - bounds.xy;
+          if min(min(local.x, bounds.z - local.x), min(local.y, bounds.w - local.y)) < 0.5 {
+              color = vec3<f32>(0.071, 0.082, 0.09);
+          }
+      }
+      if inside(point, vec4<f32>(17.0, 259.0, 11.5, 101.0)) {
+          color = vec3<f32>(0.098, 0.141, 0.173);
+          let level = clamp((max(tracks[track].peaks.x, tracks[track].peaks.y) + 60.0) / 60.0, 0.0, 1.0);
+          let y = 360.0 - point.y;
+          if point.x > 18.0 && point.x < 27.5 && fract(y / 4.0) < 0.8 {
+              color = vec3<f32>(0.141, 0.239, 0.294);
+              if y < level * 101.0 {
+                  color = select(BLUE, vec3<f32>(0.643, 0.871, 0.953), y > 85.0);
+              }
+          }
+      }
+      if inside(point, widget(17u, 0u)) {
+          color = select(vec3<f32>(0.141, 0.239, 0.294), vec3<f32>(0.929, 0.286, 0.314), max(tracks[track].peaks.z, tracks[track].peaks.w) >= 0.0);
+      }
+      if point.y >= 255.0 && point.y < 360.0 && abs(point.x - 44.0) < 1.0 {
+          color = vec3<f32>(0.082, 0.106, 0.129);
+      }
+      let fader_y = 273.0 + (12.0 - clamp(tracks[track].values.x, -60.0, 12.0)) / 72.0 * 69.0;
+      color = fit(color, IMG_FADER, point, vec4<f32>(35.0, fader_y - 18.0, 18.0, 36.0));
+      let automation = widget(12u, 0u);
+      if inside(point, automation) {
+          color = select(vec3<f32>(0.086, 0.133, 0.149), vec3<f32>(0.486, 0.655, 0.455), tracks[track].state.y == 1u);
+      }
+      if point.y >= 405.0 {
+          color = select(vec3<f32>(0.125, 0.141, 0.149), tracks[track].color.rgb, flag(track, 10u));
+      }
+      return display(color);
+  }
+  fn result(track: u32, kind: u32, slot: u32, point: vec2<f32>) {
+      var value = 0.0;
+      if kind == 1u {
+          value = 12.0 - clamp((lower_point(point, fx_extra(track)).y - 273.0) / 69.0, 0.0, 1.0) * 72.0;
+      }
+      if kind == 2u {
+          value = clamp((point.x - 6.0) / 73.5 * 2.0 - 1.0, -1.0, 1.0);
+      }
+      if kind == 14u {
+          value = clamp(frame.mouse.w + (frame.mouse.z - frame.mouse.y) * 0.3, -60.0, 12.0);
+      }
+      host_action(track, kind, slot, value);
+  }
+  // Resolve a pointer gesture to a REAPER action.
+  @compute @workgroup_size(1)
+  fn pick() {
+      host_clear_hit();
+      if frame.dragging.x > 0u && frame.dragging.x <= u32(frame.viewport.w) {
+          let track = frame.dragging.x - 1u;
+          result(track, frame.dragging.y, frame.dragging.z, frame.mouse.xy - tracks[track].rect.xy);
+          return;
+      }
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if !inside(frame.mouse.xy, tracks[track].rect) || any(frame.mouse.xy < tracks[track].clip.xy) || any(frame.mouse.xy >= tracks[track].clip.zw) {
+              continue;
+          }
+          let raw = frame.mouse.xy - tracks[track].rect.xy;
+          let extra = fx_extra(track);
+          for (var slot = 0u; slot < fx_rows(extra); slot++) {
+              if inside(raw, widget(13u, slot)) && slot <= tracks[track].state.w {
+                  result(track, select(13u, 8u, slot == tracks[track].state.w), slot, raw);
+                  return;
+              }
+          }
+          if raw.y >= 74.0 && raw.y < 74.0 + extra {
+              continue;
+          }
+          let point = lower_point(raw, extra);
+          for (var slot = 0u; slot < min(tracks[track].counts.x, 2u); slot++) {
+              if inside(point, widget(14u, slot)) {
+                  result(track, 14u, slot, raw);
+                  return;
+              }
+          }
+          for (var kind = 1u; kind <= 19u; kind++) {
+              if kind == 13u || kind == 14u || (flag(track, 0u) && (kind == 6u || kind == 7u)) {
+                  continue;
+              }
+              if inside(point, widget(kind, 0u)) {
+                  result(track, kind, 0u, raw);
+                  return;
+              }
+          }
+      }
+  }
+
+  fn label(track: u32, source: u32, font: u32, bounds: vec4<f32>, ink: vec4<f32>, center: bool) {
+      host_strip_label(track, source, font, bounds, ink, center, 0.0);
+  }
+
+  // Emit Glyphon labels using the same geometry as the controls.
+  fn emit_track_labels(track: u32) {
+      let extra = fx_extra(track);
+      let ink = label_ink(0xced2d7u);
+      let subdued = label_ink(0x858e96u);
+      label(track, TEXT_INSERTS, FONT_BODY, vec4<f32>(17.5, 5.0, 65.0, 14.0), ink, false);
+
+      let effect_count = tracks[track].state.w;
+      for (var slot = 0u; slot < fx_rows(extra); slot++) {
+          let row = widget(13u, slot);
+          if slot < effect_count {
+              let enabled = (u32(tracks[track].values.w) & (1u << slot)) != 0u;
+              let bounds = vec4<f32>(row.x + 15.0, row.y + 1.0, row.z - 17.0, 14.0);
+              label(track, FX_NAME + slot, FONT_FX, bounds, select(subdued, ink, enabled), false);
+          } else if slot == effect_count {
+              let bounds = vec4<f32>(row.x + 3.0, row.y + 1.0, row.z - 6.0, 14.0);
+              label(track, TEXT_CHAIN, FONT_SMALL, bounds, label_ink(0x8e9ba4u), false);
+          }
+      }
+
+      for (var slot = 0u; slot < min(tracks[track].counts.x, 2u); slot++) {
+          let row = widget(14u, slot);
+          let bounds = vec4<f32>(row.x + 2.0, row.y + extra, row.z - 4.0, 17.0);
+          label(track, SEND_NAME + slot, FONT_BODY, bounds, ink, false);
+      }
+
+      let route = widget(9u, 0u);
+      label(track, TEXT_ROUTE, FONT_BODY, vec4<f32>(route.x, route.y + extra, route.zw), ink, true);
+      let monitor = array<u32, 3>(TEXT_OFF, TEXT_ON, TEXT_AUTO);
+      for (var kind = 3u; kind <= 7u; kind++) {
+          if kind == 5u || (flag(track, 0u) && kind >= 6u) { continue; }
+          let button = widget(kind, 0u);
+          let bounds = vec4<f32>(button.x, button.y + extra + 1.0, button.z, button.w - 2.0);
+          switch kind {
+              case 3u: {
+                  let mute_ink = select(ink, label_ink(0x171717u), flag(track, 2u));
+                  label(track, TEXT_MUTE, FONT_BUTTON, bounds, mute_ink, true);
+              }
+              case 4u: { label(track, TEXT_SOLO, FONT_BUTTON, bounds, ink, true); }
+              case 6u: { label(track, TEXT_RECORD, FONT_BUTTON, bounds, ink, true); }
+              case 7u: {
+                  label(track, monitor[min(tracks[track].state.z, 2u)], FONT_SMALL, bounds, ink, true);
+              }
+              default: {}
+          }
+      }
+
+      label(track, GAIN_LABEL, FONT_BODY, vec4<f32>(2.0, 232.0 + extra, 81.5, 15.0), ink, true);
+      let ticks = array<u32, 7>(TEXT_PLUS_12, TEXT_PLUS_00, TEXT_MINUS_12, TEXT_MINUS_24, TEXT_MINUS_36, TEXT_MINUS_48, TEXT_MINUS_60);
+      for (var tick = 0u; tick < 7u; tick++) {
+          let y = 271.0 + f32(tick) * 11.5 + extra;
+          label(track, ticks[tick], FONT_METER, vec4<f32>(1.0, y, 15.0, 10.0), ink, false);
+      }
+
+      label(track, TRACK_INDEX, FONT_BODY, vec4<f32>(4.0, 365.0 + extra, 76.0, 14.0), ink, false);
+      let modes = array<u32, 6>(TEXT_TRIM, TEXT_READ, TEXT_TOUCH, TEXT_WRITE, TEXT_LATCH, TEXT_LATCH_PREVIEW);
+      let mode = tracks[track].state.y;
+      let mode_ink = select(ink, label_ink(0x101416u), mode == 1u);
+      label(track, modes[select(mode, 0u, mode > 5u)], FONT_SMALL, vec4<f32>(10.0, 384.0 + extra, 57.0, 14.0), mode_ink, false);
+      label(track, TEXT_ARROW, FONT_SMALL, vec4<f32>(68.0, 384.0 + extra, 9.0, 14.0), ink, true);
+
+      let luminance = dot(tracks[track].color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+      let name_ink = select(vec4<f32>(1.0), label_ink(0x101416u), flag(track, 10u) && luminance > 0.6);
+      label(track, TRACK_NAME, FONT_TRACK, vec4<f32>(2.0, 405.0 + extra, 81.5, 15.0), name_ink, true);
+  }
+
+  @compute @workgroup_size(1)
+  fn emit_labels() {
+      host_begin_layout(vec2<f32>(0.0));
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if strip_visible(track) {
+              emit_track_labels(track);
+          }
+      }
+  }

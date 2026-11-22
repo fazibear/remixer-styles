@@ -1,0 +1,610 @@
+name: Nocturne
+min_height: 778
+track_layout: strips
+expand_fx: true
+
+fonts:
+  track: { file: font.otf, size: 39 }
+  fx: { file: font.otf, size: 30 }
+  pan: { file: font.otf, size: 20 }
+  pan_marker: { file: font.otf, size: 18 }
+  meter: { file: font.otf, size: 15 }
+  gain: { file: font.otf, size: 22 }
+  button: { file: font.otf, size: 22 }
+  menu: { file: font.otf, size: 19 }
+
+strings:
+  pan: "PAN"
+  left: "L"
+  right: "R"
+  plus_12: "+12"
+  minus_6: "-6"
+  minus_24: "-24"
+  minus_42: "-42"
+  minus_60: "-60"
+  mute: "M"
+  solo: "S"
+  menu: "..."
+
+shader: |
+  // Nocturne — live mixer inspired by the supplied bronze/obsidian/red-tube artwork.
+  // Shared data/control ABI; artwork is provided by this style.
+  const PI: f32 = 3.14159265;
+  const BRONZE: vec3<f32> = vec3<f32>(0.56, 0.37, 0.24);
+  const GOLD: vec3<f32> = vec3<f32>(0.83, 0.64, 0.44);
+  const RED: vec3<f32> = vec3<f32>(1.0, 0.015, 0.005);
+  const FOOTER_TOP: f32 = 762.0;
+  const FOOTER_HEIGHT: f32 = 16.0;
+  fn strip_metrics() -> vec3<f32> {
+      return vec3<f32>(132.0, 144.0, FOOTER_TOP + FOOTER_HEIGHT);
+  }
+  @compute @workgroup_size(1)
+  fn measure() {
+      host_measure(strip_metrics());
+  }
+  fn inside(point: vec2<f32>, bounds: vec4<f32>) -> bool {
+      return all(point >= bounds.xy) && all(point < bounds.xy + bounds.zw);
+  }
+  fn flag(track: u32, bit: u32) -> bool {
+      return (tracks[track].state.x & (1u << bit)) != 0u;
+  }
+  fn image(id: u32, uv: vec2<f32>) -> vec4<f32> {
+      let bounds = images[id * 2u];
+      if bounds.z == 0u || any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) {
+          return vec4<f32>(0.0);
+      }
+      return textureLoad(art, vec2<i32>(bounds.xy + vec2<u32>(uv * vec2<f32>(bounds.zw))), 0);
+  }
+  fn over(color: vec3<f32>, id: u32, uv: vec2<f32>) -> vec3<f32> {
+      let a = image(id, uv);
+      return mix(color, a.rgb, a.a);
+  }
+  // Fit artwork with one uniform scale; unused space stays transparent.
+  fn fit(color: vec3<f32>, id: u32, point: vec2<f32>, rect: vec4<f32>) -> vec3<f32> {
+      let size = vec2<f32>(images[id * 2u].zw);
+      if any(size == vec2<f32>(0.0)) {
+          return color;
+      }
+      let scale = min(rect.z / size.x, rect.w / size.y);
+      let drawn = size * scale;
+      return over(color, id, (point - rect.xy - (rect.zw - drawn) * 0.5) / drawn);
+  }
+  fn display(color: vec3<f32>) -> vec4<f32> {
+      let v = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+      return vec4<f32>(select(pow((v + 0.055) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045)), 1.0);
+  }
+  fn line(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+      let local = point - a;
+      let v = b - a;
+      return length(local - v * clamp(dot(local, v) / dot(v, v), 0.0, 1.0));
+  }
+  fn star(point: vec2<f32>, bounds: f32) -> f32 {
+      var d = 1000.0;
+      for (var i = 0u; i < 5u; i++) {
+          let a = f32(i) * 4.0 * PI / 5.0 - PI / 2.0;
+          let b = f32(i + 1u) * 4.0 * PI / 5.0 - PI / 2.0;
+          d = min(d, line(point, bounds * vec2<f32>(cos(a), sin(a)), bounds * vec2<f32>(cos(b), sin(b))));
+      }
+      return d;
+  }
+  fn fx_extra(track: u32) -> f32 {
+      return max(0.0, tracks[track].rect.w - strip_metrics().z);
+  }
+  const FX_TOP: f32 = 193.0;
+  const FX_ROW_PITCH: f32 = 30.0;
+  const FX_ROW_HEIGHT: f32 = 23.0;
+  const FX_BOTTOM: f32 = FX_TOP + FX_ROW_PITCH + FX_ROW_HEIGHT;
+  fn fx_rows(extra: f32) -> u32 {
+      return min(16u, 2u + u32(extra / FX_ROW_PITCH));
+  }
+  fn fx_label_bounds(row: vec4<f32>) -> vec4<f32> {
+      return vec4<f32>(row.x + 12.0, row.y, row.z - 15.0, row.w);
+  }
+
+  fn lower_point(point: vec2<f32>, extra: f32) -> vec2<f32> {
+      return vec2<f32>(point.x, point.y - clamp(point.y - FX_BOTTOM, 0.0, extra));
+  }
+  fn widget(kind: u32, slot: u32, width: f32) -> vec4<f32> {
+      switch kind {
+          case 1u: {
+              return vec4<f32>(width * 0.43 - 16.0, 346.0, 32.0, 300.0);
+          }
+          case 2u: {
+              return vec4<f32>(width * 0.5 - 30.0, 270.0, 60.0, 60.0);
+          }
+          case 3u: {
+              return vec4<f32>(width * 0.32 - 15.0, 704.0, 30.0, 31.0);
+          }
+          case 4u: {
+              return vec4<f32>(width * 0.68 - 15.0, 704.0, 30.0, 31.0);
+          }
+          case 9u: {
+              return vec4<f32>(10.0, FX_BOTTOM, width - 20.0, 270.0 - FX_BOTTOM);
+          }
+          case 13u: {
+              return vec4<f32>(10.0, FX_TOP + f32(slot) * FX_ROW_PITCH, width - 20.0, FX_ROW_HEIGHT);
+          }
+          case 15u: {
+              return vec4<f32>(12.0, 144.0, width - 24.0, 42.0);
+          }
+          case 16u: {
+              return vec4<f32>(6.0, 744.0, width - 12.0, 23.0);
+          }
+          case 17u: {
+              return vec4<f32>(width * 0.72 - 16.0, 357.0, 32.0, 13.0);
+          }
+          default: {
+              return vec4<f32>(0.0);
+          }
+      }
+  }
+  const HEADER_HEIGHT: f32 = 126.0;
+  const ARCH_TOP: f32 = 114.0;
+  fn eye_fire(point: vec2<f32>, socket: vec2<f32>, time: f32, phase: f32) -> vec3<f32> {
+      let local = point - socket;
+      let pulse = 0.68 + 0.20 * sin(time * 8.0 + phase) + 0.12 * sin(time * 17.0 - phase);
+      let glow = 1.0 - smoothstep(0.0, 1.0, length(local / vec2<f32>(17.0, 13.0)));
+      let ember = 1.0 - smoothstep(0.0, 1.0, length(local / vec2<f32>(5.8, 4.0)));
+
+      let rise = clamp(-local.y / (12.0 + pulse * 5.0), 0.0, 1.0);
+      let bend = sin(time * 10.0 + phase + rise * 4.0) * rise * 3.5;
+      let width = mix(5.2, 0.5, rise);
+      let tongue = (1.0 - smoothstep(0.0, width, abs(local.x - bend)))
+          * (1.0 - smoothstep(0.55, 1.0, rise))
+          * (1.0 - smoothstep(0.0, 3.5, local.y));
+
+      return pulse * (
+          vec3<f32>(0.44, 0.035, 0.004) * glow * glow
+          + vec3<f32>(0.92, 0.33, 0.055) * tongue
+          + vec3<f32>(1.0, 0.74, 0.28) * ember
+      );
+  }
+
+  // Draw a single atlas region with a soft edge for overlapping neighbors.
+  fn banner_piece(color: vec3<f32>, point: vec2<f32>, bounds: vec2<f32>) -> vec3<f32> {
+      if point.x < bounds.x || point.x >= bounds.y || point.y < 0.0 || point.y >= 204.0 {
+          return color;
+      }
+      let edge = smoothstep(0.0, 24.0, point.x - bounds.x)
+          * smoothstep(0.0, 24.0, bounds.y - point.x);
+      // Animation positions stay in the original banner artwork's coordinates.
+      let artwork_size = vec2<f32>(2172.0, 204.0);
+      var sample_point = point;
+      var glow = vec3<f32>(0.0);
+      let time = bitcast<f32>(frame.dragging.w);
+      if point.x < 190.0 || point.x > 1980.0 {
+          let wicks = array<vec2<f32>, 6>(
+              vec2<f32>(58.0, 110.0), vec2<f32>(101.0, 75.0), vec2<f32>(148.0, 112.0),
+              vec2<f32>(2025.0, 112.0), vec2<f32>(2069.0, 76.0), vec2<f32>(2114.0, 111.0)
+          );
+          for (var candle = 0u; candle < 6u; candle++) {
+              let wick = wicks[candle];
+              let local = point - wick;
+              let phase = f32(candle) * 2.37;
+              let flicker = 0.65 + 0.20 * sin(time * 11.0 + phase)
+                  + 0.15 * sin(time * 19.0 - phase);
+              let bend = sin(time * 7.0 + phase) * 3.5;
+              let rising = clamp(-local.y / 38.0, 0.0, 1.0);
+              let flame_mask = (1.0 - smoothstep(9.0, 20.0, abs(local.x)))
+                  * (1.0 - smoothstep(40.0, 55.0, -local.y));
+              // Bend the painted flame above the wick, leaving the candle body fixed.
+              sample_point -= vec2<f32>(bend, 3.0 * (flicker - 0.65)) * rising * flame_mask;
+              let halo_point = (local + vec2<f32>(0.0, 17.0)) / vec2<f32>(25.0, 36.0);
+              let halo = 1.0 - smoothstep(0.05, 1.55, length(halo_point));
+              glow += vec3<f32>(0.38, 0.14, 0.025) * (halo * halo * flicker);
+          }
+      }
+      // Add fire at the three skulls' eye sockets in banner coordinates.
+      if point.y > 89.0 && point.y < 130.0 {
+          let sockets = array<vec2<f32>, 6>(
+              vec2<f32>(590.0, 113.0), vec2<f32>(619.0, 113.0),
+              vec2<f32>(939.0, 116.0), vec2<f32>(990.0, 117.0),
+              vec2<f32>(1299.0, 115.0), vec2<f32>(1328.0, 115.0)
+          );
+          for (var eye = 0u; eye < 6u; eye++) {
+              if abs(point.x - sockets[eye].x) < 17.0 {
+                  glow += eye_fire(point, sockets[eye], time, f32(eye) * 1.73);
+              }
+          }
+      }
+      let pixel = image(IMG_BANNER, sample_point / artwork_size);
+      return mix(color, pixel.rgb, pixel.a * edge) + glow * edge;
+  }
+
+  // Continuous smoke and rising embers across the mixer background.
+  fn mixer_atmosphere(point: vec2<f32>, time: f32) -> vec3<f32> {
+      let vertical = sin(point.y * 0.035 + time * 0.23);
+      let veil = sin(point.x * 0.012 + vertical * 2.4 - time * 0.75)
+          * sin(point.x * 0.004 - point.y * 0.018 + time * 0.45);
+      let haze = smoothstep(-0.1, 0.85, veil) * 0.34;
+      let edge = smoothstep(0.0, 14.0, point.y)
+          * (1.0 - smoothstep(frame.viewport.y - 22.0, frame.viewport.y, point.y));
+      var light = vec3<f32>(0.42, 0.085, 0.04) * haze;
+      for (var layer = 0u; layer < 3u; layer++) {
+          let seed = f32(layer) * 19.73;
+          let pitch = vec2<f32>(64.0 + f32(layer) * 19.0, 96.0);
+          let drift = vec2<f32>(time * (1.4 + f32(layer)), time * (18.0 + f32(layer) * 7.0));
+          let cell = floor((point + drift) / pitch);
+          let random = fract(sin(dot(cell, vec2<f32>(127.1, 311.7)) + seed) * 43758.5453);
+          let center = vec2<f32>(0.15 + random * 0.7, 0.25 + fract(random * 17.3) * 0.5) * pitch;
+          let local = fract((point + drift) / pitch) * pitch - center;
+          let sway = sin(time * 0.8 + random * 12.0) * 4.0;
+          let distance = length((local - vec2<f32>(sway, 0.0)) / vec2<f32>(1.2, 2.4));
+          let core = 1.0 - smoothstep(0.0, 1.8, distance);
+          let halo = exp(-distance * 0.9) * 0.12;
+          let flicker = 0.65 + 0.35 * sin(time * 3.0 + random * 31.0);
+          light += vec3<f32>(0.8, 0.25, 0.055) * (core * 0.8 + halo * 1.5) * flicker;
+      }
+      return light * edge;
+  }
+
+  fn draw_banner(screen: vec2<f32>) -> vec3<f32> {
+      var color = vec3<f32>(0.018, 0.008, 0.007);
+      let width = frame.viewport.x;
+      // Width changes placement only. Artwork retains its size and overlaps
+      // through transparent pixels and feathered edges when space gets tight.
+      let scale = HEADER_HEIGHT / 204.0;
+      let y = screen.y / scale;
+      let center = width * 0.5;
+      let left_center = (200.0 * scale + center - 325.0 * scale) * 0.5;
+      let right_center = (center + 325.0 * scale + width - 204.0 * scale) * 0.5;
+      let boundary = select(1274.0, 1290.0, y >= 174.0);
+      color = banner_piece(color, vec2<f32>(420.0 + (screen.x - left_center) / scale, y), vec2<f32>(200.0, 640.0));
+      color = banner_piece(color, vec2<f32>(1621.0 + (screen.x - right_center) / scale, y), vec2<f32>(boundary, 1968.0));
+      color = banner_piece(color, vec2<f32>(965.0 + (screen.x - center) / scale, y), vec2<f32>(640.0, boundary));
+      color = banner_piece(color, vec2<f32>(screen.x / scale, y), vec2<f32>(0.0, 200.0));
+      color = banner_piece(color, vec2<f32>(2172.0 - (width - screen.x) / scale, y), vec2<f32>(1968.0, 2172.0));
+      let time = bitcast<f32>(frame.dragging.w);
+      let shadow = 0.25 + 0.75 * (1.0 - smoothstep(0.12, 0.6, max(color.r, max(color.g, color.b))));
+      return color + mixer_atmosphere(screen, time) * shadow;
+  }
+
+  fn strip_background(track: u32, point: vec2<f32>, screen: vec2<f32>) -> vec3<f32> {
+      let grain = fract(sin(dot(floor(point), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+      let selected = select(vec3<f32>(0.0), vec3<f32>(0.035, 0.015, 0.006), flag(track, 1u));
+      let atmosphere = mixer_atmosphere(screen, bitcast<f32>(frame.dragging.w));
+      return vec3<f32>(0.024, 0.019, 0.016) + grain * 0.012 + selected + atmosphere * 0.65;
+  }
+
+  fn arch_distance(point: vec2<f32>, width: f32) -> f32 {
+      let radius = width * 0.5 - 8.0;
+      let center_y = ARCH_TOP + radius;
+      return length(vec2<f32>(point.x - width * 0.5, min(point.y - center_y, 0.0))) - radius;
+  }
+
+  fn draw_arch(color: vec3<f32>, point: vec2<f32>, width: f32) -> vec3<f32> {
+      let center_y = ARCH_TOP + width * 0.5 - 8.0;
+      let distance = abs(arch_distance(point, width));
+      return select(color, BRONZE * (1.0 - distance * 0.4), point.y < center_y && distance < 1.4);
+  }
+  fn meter_flame(x: f32, height: f32, head: f32, time: f32) -> vec3<f32> {
+      let ignition = smoothstep(0.0, 8.0, head);
+      let depth = head - height;
+      let body = smoothstep(-2.0, 6.0, depth);
+      let heat = vec3<f32>(1.0, 0.25, 0.025);
+      var fire = RED * body * (0.17 + 0.13 * exp(-abs(x) * 0.17));
+
+      // A broad base splits into two tapered tongues that curl as they rise.
+      for (var tongue = 0u; tongue < 2u; tongue++) {
+          let phase = f32(tongue) * 2.6;
+          let tip = head - f32(tongue) * 11.0 + sin(time * 6.0 + phase) * 2.0;
+          let below = tip - height;
+          let taper = smoothstep(0.0, 27.0, below);
+          let center = sin(height * 0.066 - time * 5.0 + phase) * (1.1 + 2.6 * (1.0 - taper))
+          + sin(height * 0.15 - time * 8.0 + phase) * 0.75;
+          let width = mix(0.55, 4.5, taper);
+          let distance = abs(x - center);
+          let shape = (1.0 - smoothstep(width * 0.55, width, distance)) * smoothstep(-1.5, 3.0, below);
+          let core = (1.0 - smoothstep(0.0, width * 0.65, distance)) * shape;
+          fire += heat * shape * 0.55 + vec3<f32>(1.0, 0.70, 0.21) * core * 0.65;
+      }
+
+      // Small sparks drift upward through the tongues and fade above the tip.
+      let rising = (height - time * 33.0) / 11.0;
+      let cell = floor(rising);
+      let seed = fract(sin(cell * 74.7) * 43758.5453);
+      let spark_x = (seed - 0.5) * 11.0;
+      let spark = 1.0 - smoothstep(0.0, 1.35, length(vec2<f32>(x - spark_x, (fract(rising) - 0.5) * 11.0)));
+      fire += vec3<f32>(1.0, 0.53, 0.08) * spark * seed * (1.0 - smoothstep(0.0, 9.0, -depth));
+      return fire * ignition;
+  }
+  // Draw the current mixer frame.
+  @fragment fn fs(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+      let screen = pixel.xy / frame.viewport.z;
+      var track = u32(frame.viewport.w);
+      // Leave the artwork above the arch overlap clear.
+      if screen.y >= ARCH_TOP - 2.0 {
+          for (var i = 0u; i < u32(frame.viewport.w); i++) {
+              if inside(screen, tracks[i].rect) && all(screen >= tracks[i].clip.xy) && all(screen < tracks[i].clip.zw) {
+                  track = i;
+                  break;
+              }
+          }
+      }
+      if screen.y < HEADER_HEIGHT {
+          var banner = draw_banner(screen);
+          if track < u32(frame.viewport.w) {
+              let point = screen - tracks[track].rect.xy;
+              let width = tracks[track].rect.z;
+              if arch_distance(point, width) <= 0.0 {
+                  banner = strip_background(track, point, screen);
+              }
+              banner = draw_arch(banner, point, width);
+          }
+          return display(banner);
+      }
+      if track >= u32(frame.viewport.w) {
+          return display(vec3<f32>(0.012, 0.008, 0.007) + mixer_atmosphere(screen, bitcast<f32>(frame.dragging.w)) );
+      }
+      let raw = screen - tracks[track].rect.xy;
+      let extra = fx_extra(track);
+      let point = lower_point(raw, extra);
+      let width = tracks[track].rect.z;
+      if point.y >= strip_metrics().z {
+          return display(vec3<f32>(0.012, 0.008, 0.007) + mixer_atmosphere(screen, bitcast<f32>(frame.dragging.w)) );
+      }
+      var color = strip_background(track, point, screen);
+      // Narrow extracted ironwork borders, never copied labels or baked meter values.
+      let border_size = max(vec2<f32>(images[IMG_BORDER * 2u].zw), vec2<f32>(1.0));
+      if point.x < border_size.x {
+          color = over(color, IMG_BORDER, vec2<f32>(point.x / border_size.x, fract((point.y - 126.0) / border_size.y)));
+      }
+      if point.x > width - border_size.x {
+          color = over(color, IMG_BORDER, vec2<f32>((width - point.x) / border_size.x, fract((point.y - 126.0) / border_size.y)));
+      }
+      let edge = min(point.x - 6.0, width - 6.0 - point.x);
+      if edge >= 0.0 && edge < 1.0 {
+          color = BRONZE * 0.65;
+      }
+      if edge >= 2.0 && edge < 3.0 {
+          color = BRONZE * 0.28;
+      }
+      color = draw_arch(color, point, width);
+      if abs(point.y - 188.0) < 1.0 || abs(point.y - FOOTER_TOP) < 1.0 {
+          color = BRONZE * 0.6;
+      }
+      let mouse_raw = frame.mouse.xy - tracks[track].rect.xy;
+      let mouse = lower_point(mouse_raw, extra);
+      let effect_count = min(fx_rows(extra), tracks[track].state.w);
+      for (var slot = 0u; slot < effect_count; slot++) {
+          let row = widget(13u, slot, width);
+          if !inside(raw, row) {
+              continue;
+          }
+          let local = raw - row.xy;
+          color = vec3<f32>(0.042, 0.026, 0.017);
+          let enabled = flag(track, 6u) && (u32(tracks[track].values.w) & (1u << slot)) != 0u;
+          let lamp = length(local - vec2<f32>(6.0, row.w * 0.5));
+          if lamp < 2.0 {
+              color = select(BRONZE * 0.45, RED, enabled);
+          }
+          if inside(mouse_raw, row) {
+              color += BRONZE * 0.12;
+          }
+      }
+      if raw.y >= FX_BOTTOM && raw.y < FX_BOTTOM + extra {
+          return display(color);
+      }
+      let local = point - vec2<f32>(width / 2.0, 300.0);
+      let angle = tracks[track].values.y * 2.3;
+      if length(local) < 25.0 {
+          color = vec3<f32>(0.025);
+          if abs(length(local) - 23.0) < 1.0 {
+              color = BRONZE;
+          }
+      }
+      let rotated = vec2<f32>(local.x * cos(-angle) - local.y * sin(-angle), local.x * sin(-angle) + local.y * cos(-angle));
+      color = fit(color, IMG_PAN_KNOB, rotated, vec4<f32>(-24.0, -24.0, 48.0, 48.0));
+      let needle = vec2<f32>(sin(angle), -cos(angle));
+      if dot(local, needle) > 4.0 && dot(local, needle) < 20.0 && abs(local.x * needle.y - local.y * needle.x) < 0.9 {
+          color = RED * 0.8;
+      }
+      // Each flame rises independently inside its half of the glass tube.
+      let tube_x = width * 0.72;
+      let tq = point - vec2<f32>(tube_x, 496.0);
+      if abs(tq.x) < 17.0 && point.y > 370.0 && point.y < 622.0 {
+          let right = tq.x > 0.0;
+          let level = clamp((select(tracks[track].peaks.x, tracks[track].peaks.y, right) + 60.0) / 60.0, 0.0, 1.0);
+          let height = 622.0 - point.y;
+          let time = bitcast<f32>(frame.dragging.w) + select(0.0, 0.53, right);
+          let glass = pow(abs(tq.x) / 17.0, 9.0);
+          let x = tq.x - select(-7.5, 7.5, right);
+          let flame = meter_flame(x, height, level * 252.0, time);
+          let edge = 1.0 - smoothstep(13.0, 17.0, abs(tq.x));
+          color = vec3<f32>(0.027, 0.004, 0.002) + BRONZE * glass * 0.5 + flame * edge;
+          color *= mix(0.48, 1.0, smoothstep(0.0, 1.4, abs(tq.x)));
+      }
+      for (var cap = 0u; cap < 2u; cap++) {
+          let center = vec2<f32>(tube_x, select(370.0, 622.0, cap == 1u));
+          let d = length((point - center) / vec2<f32>(18.0, 10.0));
+          if d < 1.0 {
+              color = BRONZE * (0.4 + 0.6 * abs(cos(d * PI)));
+              if abs(point.x - tube_x) < 1.0 {
+                  color += GOLD * 0.3;
+              }
+          }
+          let size = vec2<f32>(48.0, select(40.0, 35.0, cap == 1u));
+          let origin = vec2<f32>(tube_x - 24.0, select(355.0, 616.0, cap == 1u));
+          color = fit(color, select(IMG_TUBE_TOP, IMG_TUBE_BOTTOM, cap == 1u), point, vec4<f32>(origin, size));
+      }
+      let bounds = widget(1u, 0u, width);
+      let rail_x = bounds.x + bounds.z / 2.0;
+      if abs(point.x - rail_x) < 8.0 && point.y > 366.0 && point.y < 636.0 {
+          color = vec3<f32>(0.005);
+          if abs(point.x - rail_x) > 6.0 {
+              color = BRONZE * 0.6;
+          }
+      }
+      for (var tick = 0u; tick < 5u; tick++) {
+          let y = 370.0 + f32(tick) * 63.0;
+          if point.x > 15.0 && point.x < rail_x - 12.0 && abs(point.y - y) < 0.7 {
+              color = BRONZE;
+          }
+      }
+      let fader_y = bounds.y + 24.0 + (12.0 - clamp(tracks[track].values.x, -60.0, 12.0)) / 72.0 * (bounds.w - 48.0);
+      let fader = point - vec2<f32>(rail_x, fader_y);
+      if all(abs(fader) < vec2<f32>(16.0, 24.0)) {
+          color = BRONZE * (0.7 + 0.3 * cos(fader.y * 0.15));
+          color = fit(color, IMG_FADER, fader, vec4<f32>(-16.0, -24.0, 32.0, 48.0));
+          if star(fader * 0.8, 11.0) < 0.65 {
+              color = vec3<f32>(0.025);
+          }
+      }
+      let readout = vec4<f32>(width / 2.0 - 56.0, 656.0, 112.0, 32.0);
+      if inside(point, readout) {
+          let local = point - readout.xy;
+          color = vec3<f32>(0.015);
+          if min(min(local.x, readout.z - local.x), min(local.y, readout.w - local.y)) < 1.0 {
+              color = BRONZE * 0.6;
+          }
+      }
+      for (var k = 3u; k <= 4u; k++) {
+          let b = widget(k, 0u, width);
+          if !inside(point, b) {
+              continue;
+          }
+          let local = point - b.xy;
+          let enabled = flag(track, select(2u, 3u, k == 4u));
+          let edge = min(min(local.x, b.z - local.x), min(local.y, b.w - local.y));
+          color = select(vec3<f32>(0.055, 0.035, 0.023), vec3<f32>(0.5, 0.012, 0.005), enabled);
+          if edge < 1.5 {
+              color = BRONZE * (1.0 - local.y / b.w * 0.6);
+          }
+          if enabled {
+              color += RED * exp(-length(local - b.zw / 2.0) * 0.08) * 0.25;
+          }
+      }
+      let clip_rect = widget(17u, 0u, width);
+      let lamp = point - (clip_rect.xy + clip_rect.zw * 0.5);
+      let lamp_radius = length(lamp);
+      let clipping = max(tracks[track].peaks.z, tracks[track].peaks.w) >= 0.0;
+      if clipping {
+          color += RED * 0.35 * (1.0 - smoothstep(3.0, 9.0, lamp_radius));
+      }
+      if lamp_radius < 5.5 {
+          let rim = select(BRONZE * 0.65, GOLD, inside(mouse, clip_rect));
+          color = rim * (0.85 - lamp.y * 0.05);
+      }
+      if lamp_radius < 3.5 {
+          color = select(RED * 0.12, RED * 0.92, clipping);
+          let glint = 1.0 - smoothstep(0.0, 2.0, length(lamp + vec2<f32>(0.8, 1.0)));
+          color += GOLD * glint * select(0.12, 0.65, clipping);
+      }
+      for (var k = 1u; k < 17u; k++) {
+          if k == 13u {
+              continue;
+          }
+          let bounds = widget(k, 0u, width);
+          if inside(mouse, bounds) && inside(point, bounds) {
+              color += BRONZE * 0.12;
+          }
+      }
+      if point.y >= FOOTER_TOP {
+          let size = vec2<f32>(images[IMG_FOOTER * 2u].zw);
+          let tile_width = size.x * FOOTER_HEIGHT / max(size.y, 1.0);
+          color = over(color, IMG_FOOTER, vec2<f32>(fract(screen.x / max(tile_width, 1.0)), (point.y - FOOTER_TOP) / FOOTER_HEIGHT));
+      }
+      return display(color);
+  }
+  fn result(track: u32, kind: u32, slot: u32, point: vec2<f32>) {
+      let bounds = widget(kind, slot, tracks[track].rect.z);
+      var value = 0.0;
+      if kind == 1u {
+          value = 12.0 - clamp((lower_point(point, fx_extra(track)).y - bounds.y - 24.0) / (bounds.w - 48.0), 0.0, 1.0) * 72.0;
+      }
+      if kind == 2u {
+          value = clamp((point.x - bounds.x) / bounds.z * 2.0 - 1.0, -1.0, 1.0);
+      }
+      host_action(track, kind, slot, value);
+  }
+  // Resolve a pointer gesture to a REAPER action.
+  @compute @workgroup_size(1)
+  fn pick() {
+      host_clear_hit();
+      if frame.dragging.x > 0u && frame.dragging.x <= u32(frame.viewport.w) {
+          let track = frame.dragging.x - 1u;
+          result(track, frame.dragging.y, frame.dragging.z, frame.mouse.xy - tracks[track].rect.xy);
+          return;
+      }
+      if frame.mouse.y < HEADER_HEIGHT {
+          return;
+      }
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if !inside(frame.mouse.xy, tracks[track].rect) || any(frame.mouse.xy < tracks[track].clip.xy) || any(frame.mouse.xy >= tracks[track].clip.zw) {
+              continue;
+          }
+          let raw = frame.mouse.xy - tracks[track].rect.xy;
+          let width = tracks[track].rect.z;
+          let extra = fx_extra(track);
+          for (var slot = 0u; slot < min(fx_rows(extra), tracks[track].state.w); slot++) {
+              if inside(raw, widget(13u, slot, width)) {
+                  result(track, 13u, slot, raw);
+                  return;
+              }
+          }
+          if raw.y >= FX_BOTTOM && raw.y < FX_BOTTOM + extra {
+              continue;
+          }
+          let point = lower_point(raw, extra);
+          for (var k = 1u; k <= 17u; k++) {
+              if k == 13u {
+                  continue;
+              }
+              if inside(point, widget(k, 0u, width)) {
+                  result(track, k, 0u, raw);
+                  return;
+              }
+          }
+      }
+  }
+
+  fn label(track: u32, source: u32, font: u32, bounds: vec4<f32>, ink: vec4<f32>, center: bool) {
+      host_strip_label(track, source, font, bounds, ink, center, HEADER_HEIGHT);
+  }
+
+  // Emit Glyphon labels using the same geometry as the controls.
+  fn emit_track_labels(track: u32) {
+      let width = tracks[track].rect.z;
+      let extra = fx_extra(track);
+      let center = width * 0.5;
+      let gold = label_ink(0xd4a370u);
+      let name_area = widget(15u, 0u, width);
+      let name_bounds = vec4<f32>(name_area.x + 2.0, name_area.y, name_area.z - 4.0, name_area.w);
+      label(track, TRACK_NAME, FONT_TRACK, name_bounds, gold, true);
+
+      let effect_count = min(fx_rows(extra), tracks[track].state.w);
+      for (var slot = 0u; slot < effect_count; slot++) {
+          let row = widget(13u, slot, width);
+          label(track, FX_NAME + slot, FONT_FX, fx_label_bounds(row), gold, false);
+      }
+
+      let pan = widget(9u, 0u, width);
+      label(track, TEXT_PAN, FONT_PAN, vec4<f32>(pan.x, pan.y + extra, pan.zw), gold, true);
+      let marker_y = 326.0 + extra;
+      label(track, TEXT_LEFT, FONT_PAN_MARKER, vec4<f32>(center - 34.0, marker_y, 20.0, 24.0), gold, true);
+      label(track, TEXT_RIGHT, FONT_PAN_MARKER, vec4<f32>(center + 14.0, marker_y, 20.0, 24.0), gold, true);
+
+      let meter_ticks = array<u32, 5>(TEXT_PLUS_12, TEXT_MINUS_6, TEXT_MINUS_24, TEXT_MINUS_42, TEXT_MINUS_60);
+      for (var tick = 0u; tick < 5u; tick++) {
+          let y = 371.0 + f32(tick) * 63.0 + extra;
+          label(track, meter_ticks[tick], FONT_METER, vec4<f32>(9.0, y, width * 0.43 - 25.0, 20.0), gold, false);
+      }
+
+      label(track, GAIN_LABEL, FONT_GAIN, vec4<f32>(center - 53.0, 657.0 + extra, 106.0, 30.0), label_ink(0xff402au), true);
+      for (var kind = 3u; kind <= 4u; kind++) {
+          let button = widget(kind, 0u, width);
+          let bounds = vec4<f32>(button.x + 1.0, button.y + 1.0 + extra, button.zw - 2.0);
+          label(track, select(TEXT_MUTE, TEXT_SOLO, kind == 4u), FONT_BUTTON, bounds, gold, true);
+      }
+      label(track, TEXT_MENU, FONT_MENU, vec4<f32>(center - 20.0, 741.0 + extra, 40.0, 21.0), label_ink(0x8f5e3du), true);
+  }
+
+  @compute @workgroup_size(1)
+  fn emit_labels() {
+      host_begin_layout(vec2<f32>(0.0));
+      for (var track = 0u; track < u32(frame.viewport.w); track++) {
+          if strip_visible(track) {
+              emit_track_labels(track);
+          }
+      }
+  }
